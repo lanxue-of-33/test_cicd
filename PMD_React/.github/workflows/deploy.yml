@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch: # 添加这一行，允许在页面手动点击运行
 
 jobs:
   build:
