@@ -1,27 +1,28 @@
 name: Build & Deploy React to IIS
 on:
   push:
-    branches: [ main ] # ⚠️改成你项目实际的主分支，比如master
+    branches:
+      - main
 
 jobs:
   build-deploy:
-    runs-on: self-hosted # 指定使用咱们这个windows自托管runner
+    runs-on: self-hosted
     steps:
-      - name: 检出代码
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: 安装Node.js
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      - name: 安装npm依赖
+      - name: Install dependencies
         run: npm ci
 
-      - name: React打包
+      - name: Build React
         run: npm run build
 
-      - name: 复制产物到IIS站点目录 E:\test_iis\PMDVeg
+      - name: Deploy to IIS folder
         run: |
           Remove-Item E:\test_iis\PMDVeg\* -Recurse -Force
           Copy-Item .\build\* E:\test_iis\PMDVeg\ -Recurse -Force
