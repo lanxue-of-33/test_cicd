@@ -1,29 +1,26 @@
-name: Build & Deploy React to IIS
+name: React CI
+
 on:
   push:
     branches:
       - main
 
 jobs:
-  build-deploy:
-    runs-on: self-hosted
+  build:
+    runs-on: [self-hosted, windows, iis]
+
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: npm
 
       - name: Install dependencies
         run: npm ci
 
-      - name: Build React
+      - name: Build
         run: npm run build
-
-      - name: Deploy to IIS folder
-        run: |
-          Remove-Item E:\test_iis\PMDVeg\* -Recurse -Force
-          Copy-Item .\build\* E:\test_iis\PMDVeg\ -Recurse -Force
-        shell: pwsh
