@@ -71,12 +71,13 @@ jobs:
         working-directory: ./PMD_React
 
       # ===================== 新增：第一步 备份旧站点 =====================
-      - name: 备份IIS旧站点（排除zip）
+      - name: 备份IIS旧站点(排除zip)
         shell: powershell
         run: |
+          [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
           # 获取当前时间戳 yyyyMMdd_HHmmss
           $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
-          # 获取commit短SHA，GitHub内置环境变量 GITHUB_SHA
+          # 获取commit短SHA, GitHub内置环境变量 GITHUB_SHA
           $commitSha = $env:GITHUB_SHA.Substring(0,7)
           $backupFileName = "$timestamp`_$commitSha.zip"
           $iisPath = "E:\test_iis\PMDVeg"
@@ -92,9 +93,10 @@ jobs:
           Compress-Archive -Path $filesToBackup.FullName -DestinationPath $backupFullPath -Force
 
       # ===================== 新增：第二步 复制新构建产物到IIS目录 =====================
-      - name: 发布：复制build产物到IIS目录
+      - name: 发布: 复制build产物到IIS目录
         shell: powershell
         run: |
+          [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
           $buildSource = "./PMD_React/dist"
           $iisTarget = "E:\test_iis\PMDVeg"
           Write-Host "复制源: $buildSource"
