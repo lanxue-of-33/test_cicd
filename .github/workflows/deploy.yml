@@ -39,6 +39,12 @@ jobs:
           node -v
           where.exe node
         shell: powershell
+
+      # ========== 新增：打印目录文件 ==========
+      - name: 列出项目目录文件
+        run: Get-ChildItem
+        shell: powershell
+
       # 步骤6：设置淘宝npm镜像，安装依赖（npm ci严格按照lock文件安装）
       - name: Install dependencies
         run: |
