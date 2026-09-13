@@ -44,7 +44,7 @@ jobs:
         run: |
           # 设置npmmirror淘宝镜像源
           npm config set registry https://registry.npmmirror.com
-          npm ci
+          npm install --no-package-lock
         shell: powershell
       # 步骤7：React项目打包，设置node最大内存4GB，防止webpack打包OOM，runner断连
       - name: Build
