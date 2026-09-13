@@ -1,4 +1,3 @@
-# 工作流名称，GitHub Actions页面展示
 name: React CI
 # 触发条件
 on:
@@ -11,34 +10,39 @@ on:
 jobs:
   # 任务名称build
   build:
-    # 调度到带有self-hosted,Windows,X64标签的自托管runner（你的Windows机器）
+    # 调度到带有self-hosted,Windows,X64标签的自托管runner（你的Windows机器）,标签需要和runner配置一致
     runs-on: [self-hosted, Windows, X64]
     steps:
-      # 步骤1：检出代码，拉取仓库代码到runner的临时工作目录
+      # 步骤1：检出代码，拉取仓库代码到runner的临时工作目录，
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4  # 这是官方预制的 action，不执行这个，就不会把代码下载到 runner 的临时工作目录，不然后续的都无法工作
+
       # 步骤2：安装Node.js20，开启npm缓存，加速重复构建
       # - name: Setup Node.js
       #   uses: actions/setup-node@v4
       #   with:
       #     node-version: 20
       #     cache: npm
+
       # 步骤3：查看本机信息，确认任务运行在你的Windows机器
       - name: 查看本机信息
         run: |
           echo "计算机主机名：$env:COMPUTERNAME"
           hostname
         shell: powershell
+
       # 步骤4：打印当前工作目录，验证代码检出位置
       - name: 打印当前工作目录
         run: pwd
         shell: powershell
+
       # 步骤5：打印node版本和node.exe路径，确认使用的node程序
       - name: 查看Node信息
         run: |
           node -v
           where.exe node
         shell: powershell
+
       # ========== 新增：打印目录文件 ==========
       - name: 列出项目根目录文件
         run: Get-ChildItem
@@ -65,3 +69,36 @@ jobs:
           NODE_OPTIONS: "--max-old-space-size=4096"
         shell: powershell
         working-directory: ./PMD_React
+
+      # ===================== 新增：第一步 备份旧站点 =====================
+      - name: 备份IIS旧站点（排除zip）
+        shell: powershell
+        run: |
+          # 获取当前时间戳 yyyyMMdd_HHmmss
+          $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+          # 获取commit短SHA，GitHub内置环境变量 GITHUB_SHA
+          $commitSha = $env:GITHUB_SHA.Substring(0,7)
+          $backupFileName = "$timestamp`_$commitSha.zip"
+          $iisPath = "E:\test_iis\PMDVeg"
+          $backupFullPath = Join-Path $iisPath $backupFileName
+
+          Write-Host "备份文件：$backupFullPath"
+          Write-Host "源目录：$iisPath"
+
+          # 获取目录内所有文件，排除后缀为 .zip 的文件
+          $filesToBackup = Get-ChildItem -Path $iisPath -Recurse | Where-Object { $_.Extension -ne ".zip" }
+
+          # 压缩，-Force 覆盖同名备份包（理论上时间戳不会重复）
+          Compress-Archive -Path $filesToBackup.FullName -DestinationPath $backupFullPath -Force
+
+      # ===================== 新增：第二步 复制新构建产物到IIS目录 =====================
+      - name: 发布：复制build产物到IIS目录
+        shell: powershell
+        run: |
+          $buildSource = "./PMD_React/build"
+          $iisTarget = "E:\test_iis\PMDVeg"
+          Write-Host "复制源: $buildSource"
+          Write-Host "目标IIS目录: $iisTarget"
+
+          # Copy-Item 递归复制，-Force 强制覆盖已有文件
+          Copy-Item -Path "$buildSource\*" -Destination $iisTarget -Recurse -Force
