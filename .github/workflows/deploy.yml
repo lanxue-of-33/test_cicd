@@ -22,11 +22,11 @@ jobs:
         uses: actions/checkout@v4
 
       # 步骤2：安装Node.js20，开启npm缓存，加速重复构建
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: npm
+      # - name: Setup Node.js
+      #   uses: actions/setup-node@v4
+      #   with:
+      #     node-version: 20
+      #     cache: npm
 
       # 步骤3：查看本机信息，确认任务运行在你的Windows机器
       - name: 查看本机信息
