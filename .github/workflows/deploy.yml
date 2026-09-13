@@ -95,7 +95,7 @@ jobs:
       - name: 发布：复制build产物到IIS目录
         shell: powershell
         run: |
-          $buildSource = "./PMD_React/build"
+          $buildSource = "./PMD_React/dist"
           $iisTarget = "E:\test_iis\PMDVeg"
           Write-Host "复制源: $buildSource"
           Write-Host "目标IIS目录: $iisTarget"
