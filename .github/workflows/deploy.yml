@@ -39,22 +39,29 @@ jobs:
           node -v
           where.exe node
         shell: powershell
-
       # ========== 新增：打印目录文件 ==========
-      - name: 列出项目目录文件
+      - name: 列出项目根目录文件
         run: Get-ChildItem
         shell: powershell
 
-      # 步骤6：设置淘宝npm镜像，安装依赖（npm ci严格按照lock文件安装）
+      # 查看PMD_React内部文件（新增调试，确认子目录内容）
+      - name: 列出PMD_React目录文件
+        run: Get-ChildItem ./PMD_React
+        shell: powershell
+
+      # 步骤6：设置淘宝npm镜像，安装依赖
       - name: Install dependencies
         run: |
           # 设置npmmirror淘宝镜像源
           npm config set registry https://registry.npmmirror.com
-          cd PMD_React & npm install --no-package-lock
+          npm install --no-package-lock
         shell: powershell
-      # 步骤7：React项目打包，设置node最大内存4GB，防止webpack打包OOM，runner断连
+        working-directory: ./PMD_React
+
+      # 步骤7：React项目打包
       - name: Build
         run: npm run build
         env:
           NODE_OPTIONS: "--max-old-space-size=4096"
         shell: powershell
+        working-directory: ./PMD_React
