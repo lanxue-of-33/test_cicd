@@ -1,27 +1,62 @@
+# 工作流名称，GitHub Actions页面展示
 name: React CI
 
+# 触发条件
 on:
+  # 代码推送到main分支，自动触发流水线
   push:
     branches:
       - main
-  workflow_dispatch: # 添加这一行，允许在页面手动点击运行
+  # 网页手动点击Run workflow运行，方便调试
+  workflow_dispatch:
 
 jobs:
+  # 任务名称build
   build:
+    # 调度到带有self-hosted,Windows,X64标签的自托管runner（你的Windows机器）
     runs-on: [self-hosted, Windows, X64]
 
     steps:
+      # 步骤1：检出代码，拉取仓库代码到runner的临时工作目录
       - name: Checkout
         uses: actions/checkout@v4
 
+      # 步骤2：安装Node.js20，开启npm缓存，加速重复构建
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
 
-      - name: Install dependencies
-        run: npm ci
+      # 步骤3：查看本机信息，确认任务运行在你的Windows机器
+      - name: 查看本机信息
+        run: |
+          echo "计算机主机名：$env:COMPUTERNAME"
+          hostname
+        shell: pwsh
 
+      # 步骤4：打印当前工作目录，验证代码检出位置
+      - name: 打印当前工作目录
+        run: pwd
+        shell: pwsh
+
+      # 步骤5：打印node版本和node.exe路径，确认使用的node程序
+      - name: 查看Node信息
+        run: |
+          node -v
+          where.exe node
+        shell: pwsh
+
+      # 步骤6：设置淘宝npm镜像，安装依赖（npm ci严格按照lock文件安装）
+      - name: Install dependencies
+        run: |
+          # 设置npmmirror淘宝镜像源
+          npm config set registry https://registry.npmmirror.com
+          npm ci
+        shell: pwsh
+
+      # 步骤7：React项目打包，设置node最大内存4GB，防止webpack打包OOM，runner断连
       - name: Build
         run: npm run build
+        env:
+          NODE_OPTIONS: "--max-old-space-size=4096"
