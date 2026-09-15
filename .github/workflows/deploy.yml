@@ -1,32 +1,64 @@
+# =============================================================
+# 自动部署流水线（主调度文件）
+# 作用：监听代码改动 → 判断改的是前端还是后端 → 只跑对应的子流程
+# 本文件不直接做"构建/发布"，它只负责"调度"，真正干活的是
+#   - ./.github/workflows/deploy-frontend.yml  （前端构建+发布到 IIS）
+#   - ./.github/workflows/deploy-backend.yml    （后端发布，目前是骨架）
+# 这种"一个主文件调用多个子文件"的结构叫 可复用工作流(reusable workflow)，
+# 子文件里用 on: workflow_call 声明"我可以被别人调用"。
+# =============================================================
+
+# name：在 GitHub 仓库 Actions 页面里显示的流水线名字
 name: 自动部署流水线
-# 并发控制：防止短时间多次提交，多个流水线同时跑，造成文件占用冲突！Windows环境必加
+
+# concurrency：并发控制（强烈建议保留，尤其 Windows 环境）
+# 问题：如果你连续 push 两次，两条流水线会同时跑，
+#       它们都要读写同一个 IIS 目录，可能互相抢文件导致"文件占用/锁定"报错。
+# 解决：把同一类流水线放进同一个 group（这里叫 "pmd-deploy"），
+#       cancel-in-progress: true 表示"新的一次运行会取消掉正在跑的旧的一次"，
+#       保证同一时间只有一条流水线在操作服务器。
 concurrency:
   group: "pmd-deploy"
   cancel-in-progress: true
 
+# on：什么情况下触发这条流水线
 on:
+  # 情况A：有人把代码推送到 main 分支时，自动触发（最常用）
   push:
     branches: [ main ]
-  # 网页手动点击Run workflow运行，方便调试（默认前端+后端都发布）
+  # 情况B：在 GitHub 网页上手动点 "Run workflow" 按钮触发，方便调试
+  #       手动触发时，下面会默认"前端+后端都发布"
   workflow_dispatch:
 
+# jobs：流水线里要执行的任务，自上而下是"定义顺序"，实际执行顺序由 needs 决定
 jobs:
+  # ---------- 任务1：检测本次改动落在哪个目录 ----------
   detect-changes:
-    name: 检测代码变更目录
-    runs-on: self-hosted
+    name: 检测代码变更目录          # 在界面上显示的名字
+    runs-on: self-hosted           # 用你自己的 Windows 机器(自托管 runner)来跑
+    # outputs：这个任务算出来的结果，可以传给后面的任务使用
+    #          这里对外暴露两个布尔值：backend_changed / frontend_changed
     outputs:
       backend_changed: ${{ steps.out.outputs.backend }}
       frontend_changed: ${{ steps.out.outputs.frontend }}
     steps:
+      # 步骤1：把仓库代码下载到 runner 上
       - name: 检出代码
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0   # dorny/paths-filter 需要完整历史来对比前后提交
+          # fetch-depth: 0 表示"拉取完整历史"，而不是只拉最新一次提交。
+          # 因为下面要判断"这次改了哪些文件"，需要对比上一次提交，所以必须拉全。
+          fetch-depth: 0
 
-      # 推送事件：用 dorny/paths-filter 判断本次改动落在哪个子项目
+      # 步骤2：推送事件时，用 dorny/paths-filter 判断改动目录
+      # dorny/paths-filter 是一个现成的 Action，它会对比本次提交改了哪些文件，
+      # 再和下面 filters 里的规则匹配：
+      #   - 只要 PMD_Backend/** 下有改动 → 输出 backend=true
+      #   - 只要 PMD_React/** 下有改动   → 输出 frontend=true
+      # 两个都改 → 两个都 true；都没改 → 两个都 false
       - name: 判断改动目录 (push)
-        if: github.event_name == 'push'
-        id: filter
+        if: github.event_name == 'push'     # 只有"推送"事件才执行这步
+        id: filter                          # 步骤id，后面用 steps.filter.outputs 取值
         uses: dorny/paths-filter@v3
         with:
           filters: |
@@ -35,23 +67,29 @@ jobs:
             frontend:
               - 'PMD_React/**'
 
-      # 手动触发：默认前端、后端都发布
+      # 步骤3：手动触发时，没有"前后提交"可对比，所以直接强制两个都发
       - name: 手动触发默认全部发布 (workflow_dispatch)
-        if: github.event_name == 'workflow_dispatch'
+        if: github.event_name == 'workflow_dispatch'   # 只有"手动触发"才执行这步
         id: filter-dispatch
         shell: powershell
         run: |
+          # 把 backend=true / frontend=true 写进 GITHUB_OUTPUT，供后续步骤读取
           Add-Content -Path $env:GITHUB_OUTPUT -Value "backend=true"
           Add-Content -Path $env:GITHUB_OUTPUT -Value "frontend=true"
 
-      # 归一化输出：推送用 dorny 结果，手动触发强制都发
+      # 步骤4：归一化输出（重要！）
+      # 上面两步只有一个会执行（另一个被 if 跳过）。GitHub 里"被跳过的步骤"
+      # 是取不到它的 outputs 的，所以这里用一个固定会执行的步骤，
+      # 把"真正的结果"统一汇总到 steps.out.outputs 里，
+      # 这样 job 的 outputs 永远能拿到正确的值。
       - name: 归一化输出
         id: out
         shell: powershell
         run: |
           if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') {
-            $backend = 'true'; $frontend = 'true'
+            $backend = 'true'; $frontend = 'true'      # 手动触发：都发
           } else {
+            # 推送触发：用 dorny 算出来的结果
             $backend = '${{ steps.filter.outputs.backend }}'
             $frontend = '${{ steps.filter.outputs.frontend }}'
           }
@@ -59,19 +97,31 @@ jobs:
           Add-Content -Path $env:GITHUB_OUTPUT -Value "frontend=$frontend"
           Write-Host "变更范围 -> backend=$backend, frontend=$frontend"
 
+  # ---------- 任务2：部署后端 ----------
   deploy-backend-job:
     name: 部署后端
-    needs: detect-changes
-    # 仅当后端目录有改动，才执行后端job
+    needs: detect-changes             # 必须先等"检测任务"算完，才能拿到它的输出
+    # if：只有 backend_changed == 'true' 才真正执行，否则这个任务被跳过(skipped)
+    #     —— 这就是"改了后端才发布后端"的实现
     if: ${{ needs.detect-changes.outputs.backend_changed == 'true' }}
+    # uses：调用另一个工作流文件（可复用工作流），真正干活的步骤在它里面
     uses: ./.github/workflows/deploy-backend.yml
 
+  # ---------- 任务3：部署前端 ----------
   deploy-frontend-job:
     name: 部署前端
-    # 两种情况：
-    # 1. 后端job执行完成之后，再跑前端（同时改前后端时串行）
-    # 2. 如果后端没触发（仅改前端），靠 always() 守卫避免被级联跳过，直接依赖 detect-changes 运行
+    # needs：前端必须等"检测任务"算完，并且（如果后端跑了）等"后端任务"跑完。
+    #        → 实现"前后端都改时，先发后端、再发前端（串行）"。
     needs: [detect-changes, deploy-backend-job]
+    # if：为什么加 always() 和 result 判断？
+    #   GitHub 规则：如果一个任务依赖的 job 被"跳过(skipped)"，它自己也会被级联跳过。
+    #   当"只改了前端"时，后端任务因为 if 不成立而被跳过，
+    #   如果不加守卫，前端任务会跟着被跳过（那就永远发不了前端了！）。
+    #   所以：
+    #     always()                                  → 即使有依赖被跳过也继续评估本任务
+    #     frontend_changed == 'true'                → 确实改了前端才发
+    #     deploy-backend-job.result != 'failure'    → 后端没失败
+    #     deploy-backend-job.result != 'cancelled'  → 后端没被取消
     if: >-
       always() &&
       needs.detect-changes.outputs.frontend_changed == 'true' &&
