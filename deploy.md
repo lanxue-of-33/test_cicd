@@ -201,6 +201,7 @@ concurrency:
 | `PROJECT_PATH` | `./PMD_Backend/PMD_Backend/PMD_Backend.csproj` | 要发布的项目 |
 | `PUBLISH_DIR` | `./PMD_Backend/PMD_Backend/bin/Release/net8.0/publish` | publish 输出目录 |
 | `SKIP_WEB_CONFIG` | `true` | 是否跳过覆盖服务器上的 web.config（见下） |
+| `LOCK_WAIT_SECONDS` | `60` | 等待 dll 锁释放的最长秒数 |
 
 ### 9.1 九个步骤
 
@@ -210,19 +211,24 @@ concurrency:
    会让 `dotnet restore` 报 `Value cannot be null. (Parameter 'path1')`）
 4. **Check dotnet** 打印 `dotnet --version`（本机已装 .NET 8 SDK，没再用 setup-dotnet 重复下载）
 5. **dotnet publish** 编译并输出到 `PUBLISH_DIR`
-6. **Backup** 备份即将被覆盖的旧文件 → `back_yyyyMMdd_HHmmss_sha.zip`（与前端 `front_` 对应）
-7. **Take site offline** 放 `app_offline.htm` + 停应用池
+6. **Take site offline** 放 `app_offline.htm` + 尝试停应用池 + **轮询等待文件解锁**
+7. **Backup** 备份即将被覆盖的旧文件 → `back_yyyyMMdd_HHmmss_sha.zip`（与前端 `front_` 对应）
 8. **Copy** 复制产物到 IIS 目录（跳过 web.config）
 9. **Bring site back online** 删 `app_offline.htm` + 启应用池（带 `if: always()`，失败也必须拉起来）
+
+> ⚠️ **步骤 6 必须排在 7、8 之前**。反过来会直接报错，见 9.5。
 
 ### 9.2 为什么要先"离线"再复制
 
 Windows 上正在运行的 dll **是被进程锁住的**，直接覆盖会报"文件被占用"。
-所以用了双保险：
+所以用了三重保障：
 
 - **`app_offline.htm`**：ASP.NET Core 模块（ANCM）一看到这个文件，就会优雅关闭应用、释放文件锁；
   删掉它应用自动重启。这是官方推荐做法。
-- **停应用池**：更彻底，覆盖前把进程整个停掉。
+- **`appcmd.exe` 停应用池**：比 PowerShell 模块更底层可靠（为什么不用模块见 9.5）。
+- **轮询等待**：真正试着以独占方式（`FileShare.None`）打开目录下的 dll，
+  确认锁确实释放了才继续。最多等 `LOCK_WAIT_SECONDS`（默认 60 秒），超时才报错。
+
 
 ### 9.3 ⚠️ 为什么必须跳过 web.config（最容易踩的坑）
 
@@ -245,7 +251,47 @@ Windows 上正在运行的 dll **是被进程锁住的**，直接覆盖会报"�
 备份不是打包整个 IIS 目录，而是**只打包"发布产物里同名的那些文件"**。
 这样不会把前端 `assets`（通常几十 MB）也塞进 `back_*.zip`，体积和速度都可控。
 
-### 9.5 想改成分开部署（后端单独一个目录 / 子应用）怎么办
+### 9.5 两个实际踩到的坑
+
+#### 坑 1：备份排在离线之前 → `The process cannot access the file ...`
+
+```
+ZipArchiveHelper : The process cannot access the file
+'E:\test_iis\PMDVeg\Microsoft.OpenApi.dll' because it is being used by another process.
+```
+
+备份要**读**这些 dll，但站点进程正锁着它们，压缩直接失败。
+**解法**：把"离线"挪到"备份"之前，先让站点松手，再备份、再复制。
+
+#### 坑 2：`Start-WebAppPool` 报 `Cannot find drive. A drive with the name 'IIS' does not exist`
+
+```
+start-webitem : Cannot find drive. A drive with the name 'IIS' does not exist.
+```
+
+两个原因叠加：
+
+1. `shell: powershell` 在自托管 runner 上跑的是 **Windows PowerShell 5.1**（不是 pwsh 7）；
+2. 5.1 的 `WebAdministration` 模块依赖 `IIS:` 驱动器，而 runner **不是管理员**时该驱动器建不起来。
+
+**解法**：改用 `C:\Windows\System32\inetsrv\appcmd.exe`（`appcmd stop apppool /apppool.name:XXX`），
+它不依赖 PowerShell 模块；模块只作为兜底，并且**先检查 `IIS:` 驱动器是否存在**，不存在就跳过，不再中断流程。
+
+如果 `appcmd` 也因为没权限失败，脚本不会崩，会**自动降级**到只用 `app_offline.htm`，
+并由轮询等待来确认锁是否释放。想让停应用池真正生效，就把自托管 runner 用管理员账号跑：
+
+```
+# 管理员 PowerShell
+cd C:\actions-runner
+.\svc.cmd uninstall
+.\svc.cmd install          # 提示输入账号时，填一个有管理员权限的账号
+.\svc.cmd start
+```
+
+> 判断 runner 到底有没有管理员权限：看第 2 步 `Runner info` 日志里的
+> `Running as admin: True/False`。
+
+### 9.6 想改成分开部署（后端单独一个目录 / 子应用）怎么办
 
 现在的方案是前后端共用 `E:\test_iis\PMDVeg`。如果你想改成：
 

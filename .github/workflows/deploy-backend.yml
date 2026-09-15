@@ -8,7 +8,9 @@ on:
 env:
   # 后端发布目标目录：与前端 IIS 站点目录保持一致（前端是 E:\test_iis\PMDVeg）
   IIS_TARGET: 'E:\test_iis\PMDVeg'
-  # IIS 应用程序池名称。留空则只依赖 app_offline.htm 离线，不操作应用池
+  # IIS 应用程序池名称。
+  #   填了  -> 会尝试用 appcmd 停/启应用池（需要 runner 有管理员权限，失败会自动降级）
+  #   留空  -> 只依赖 app_offline.htm 离线
   IIS_APP_POOL: 'PMDVeg'
   # 要发布的项目文件（.NET 8 Web API）
   PROJECT_PATH: './PMD_Backend/PMD_Backend/PMD_Backend.csproj'
@@ -16,6 +18,8 @@ env:
   PUBLISH_DIR: './PMD_Backend/PMD_Backend/bin/Release/net8.0/publish'
   # 是否跳过覆盖服务器上的 web.config（强烈建议 true，原因见第8步注释）
   SKIP_WEB_CONFIG: 'true'
+  # 等待文件锁释放的最长秒数（后端 dll 被正在运行的站点进程占用时要等）
+  LOCK_WAIT_SECONDS: '60'
 
 jobs:
   build:
@@ -34,6 +38,9 @@ jobs:
         run: |
           Write-Host "Computer name: $env:COMPUTERNAME"
           Write-Host "Workspace: $env:GITHUB_WORKSPACE"
+          Write-Host "PowerShell version: $($PSVersionTable.PSVersion.ToString())"
+          $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+          Write-Host "Running as admin: $isAdmin"
           hostname
 
       # 步骤3：补齐缺失的用户环境变量（自托管 runner 以服务方式运行时常见）
@@ -44,11 +51,11 @@ jobs:
         shell: powershell
         run: |
           $fix = @{}
-          if (-not $env:APPDATA)            { $fix['APPDATA']            = Join-Path $env:USERPROFILE 'AppData\Roaming' }
-          if (-not $env:LOCALAPPDATA)       { $fix['LOCALAPPDATA']       = Join-Path $env:USERPROFILE 'AppData\Local' }
-          if (-not $env:PROGRAMFILES)       { $fix['PROGRAMFILES']       = 'C:\Program Files' }
+          if (-not $env:APPDATA)             { $fix['APPDATA']           = Join-Path $env:USERPROFILE 'AppData\Roaming' }
+          if (-not $env:LOCALAPPDATA)        { $fix['LOCALAPPDATA']      = Join-Path $env:USERPROFILE 'AppData\Local' }
+          if (-not $env:PROGRAMFILES)        { $fix['PROGRAMFILES']      = 'C:\Program Files' }
           if (-not ${env:ProgramFiles(x86)}) { $fix['ProgramFiles(x86)'] = 'C:\Program Files (x86)' }
-          if (-not $env:ProgramData)        { $fix['ProgramData']        = 'C:\ProgramData' }
+          if (-not $env:ProgramData)         { $fix['ProgramData']       = 'C:\ProgramData' }
           foreach ($k in $fix.Keys) {
             Add-Content -Path $env:GITHUB_ENV -Value "$k=$($fix[$k])"
             Write-Host "Set $k = $($fix[$k])"
@@ -74,15 +81,107 @@ jobs:
           if ($LASTEXITCODE -ne 0) { Write-Host "dotnet publish failed"; exit $LASTEXITCODE }
           Get-ChildItem $env:PUBLISH_DIR | Select-Object -ExpandProperty Name
 
-      # 步骤6：备份即将被覆盖的旧文件
-      # 思路：只备份"发布产物里同名的那些文件"，而不是整个 IIS 目录，
-      #       这样不会把前端的 index.html / assets 一起塞进备份包，体积可控。
+      # 步骤6：让站点离线 —— 必须排在"备份"和"复制"之前！
+      # 踩过的坑：备份放在这一步之前时，Compress-Archive 直接报错
+      #   "The process cannot access the file '...Microsoft.OpenApi.dll' because it is being used by another process"
+      # 因为运行中的站点进程锁着 dll，必须先让它松手，后面的备份/复制才读得到、写得了。
+      #
+      # 三重保障：
+      #   1) app_offline.htm —— ANCM 看到它就优雅关闭应用、释放文件锁
+      #   2) appcmd 停应用池 —— 比 PowerShell 的 WebAdministration 模块更底层可靠。
+      #      （WebAdministration 的 Start/Stop-WebAppPool 依赖 IIS: 驱动器，
+      #        自托管 runner 非管理员时该驱动器不存在，会报 "Cannot find drive. A drive with the name 'IIS' does not exist"）
+      #   3) 轮询等待        —— 真正试着以独占方式打开文件，确认锁确实释放了才继续
+      - name: Take site offline
+        shell: powershell
+        run: |
+          $target = $env:IIS_TARGET
+          if (-not (Test-Path $target)) { New-Item -ItemType Directory -Path $target -Force | Out-Null }
+
+          # 1) app_offline.htm
+          $offline = Join-Path $target 'app_offline.htm'
+          Set-Content -Path $offline -Value '<html><body>Deploying backend, please wait...</body></html>' -Encoding ASCII
+          Write-Host "app_offline.htm created"
+
+          $pool = $env:IIS_APP_POOL
+          $poolStopped = $false
+
+          if ($pool -and $pool -ne '') {
+            # 2a) prefer appcmd.exe (works even when the IIS: drive is unavailable)
+            $appcmd = Join-Path $env:SystemRoot 'System32\inetsrv\appcmd.exe'
+            if (Test-Path $appcmd) {
+              & $appcmd stop apppool "/apppool.name:$pool"
+              if ($LASTEXITCODE -eq 0) {
+                Write-Host "App pool stopped via appcmd: $pool"
+                $poolStopped = $true
+              } else {
+                Write-Host "appcmd stop failed (exit $LASTEXITCODE) - maybe no admin rights, fallback to app_offline.htm only"
+              }
+            } else {
+              Write-Host "appcmd.exe not found, skip app pool stop"
+            }
+
+            # 2b) fallback: WebAdministration module, but only if the IIS: drive really exists
+            if (-not $poolStopped) {
+              Import-Module WebAdministration -ErrorAction SilentlyContinue
+              if (Get-PSDrive -Name IIS -ErrorAction SilentlyContinue) {
+                $state = (Get-WebAppPoolState -Name $pool -ErrorAction SilentlyContinue).Value
+                Write-Host "App pool [$pool] state: $state"
+                if ($state -eq 'Started') {
+                  Stop-WebAppPool -Name $pool
+                  $poolStopped = $true
+                  Write-Host "App pool stopped via WebAdministration"
+                }
+              } else {
+                Write-Host "IIS: drive unavailable, skip WebAdministration"
+              }
+            }
+          } else {
+            Write-Host "IIS_APP_POOL is empty, rely on app_offline.htm only"
+          }
+
+          # 3) wait until the dll files are really writable
+          $limit = 60
+          if ($env:LOCK_WAIT_SECONDS -match '^\d+$') { $limit = [int]$env:LOCK_WAIT_SECONDS }
+          $deadline = (Get-Date).AddSeconds($limit)
+          $free = $false
+
+          while ((Get-Date) -lt $deadline) {
+            $free    = $true
+            $locked  = $null
+            foreach ($f in (Get-ChildItem -Path $target -Filter '*.dll' -ErrorAction SilentlyContinue)) {
+              $fs = $null
+              try {
+                $fs = [System.IO.File]::Open($f.FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+              } catch {
+                $locked = $f.Name
+                $free   = $false
+                break
+              } finally {
+                if ($fs) { $fs.Close(); $fs.Dispose() }
+              }
+            }
+            if ($free) { break }
+            Write-Host "Still locked: $locked - waiting 3s ..."
+            Start-Sleep -Seconds 3
+          }
+
+          if (-not $free) {
+            Write-Host "ERROR: files under $target are still locked after $limit seconds."
+            Write-Host "Hint: run the self-hosted runner as Administrator, or check IIS_APP_POOL name."
+            exit 1
+          }
+          Write-Host "All dll files are writable now"
+
+      # 步骤7：备份即将被覆盖的旧文件（此时锁已释放，可以正常读取）
+      # 只备份"发布产物里同名的那些文件"，而不是整个 IIS 目录，
+      # 这样不会把前端的 index.html / assets 一起塞进备份包，体积可控。
       # 命名沿用前端规则，前缀换成 back_ ：back_yyyyMMdd_HHmmss_commitSha.zip
       - name: Backup current backend files
         shell: powershell
         run: |
-          $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
-          $sha       = $env:GITHUB_SHA.Substring(0,7)
+          $timestamp  = Get-Date -Format "yyyyMMdd_HHmmss"
+          $sha        = $env:GITHUB_SHA.Substring(0,7)
           $backupFile = Join-Path $env:IIS_TARGET "back_$timestamp`_$sha.zip"
 
           $items = @()
@@ -99,42 +198,8 @@ jobs:
             exit 0
           }
 
-          if (-not (Test-Path $env:IIS_TARGET)) {
-            New-Item -ItemType Directory -Path $env:IIS_TARGET -Force | Out-Null
-          }
           Compress-Archive -Path $items -DestinationPath $backupFile -Force
           Write-Host "Backup created"
-
-      # 步骤7：让站点离线，避免 dll 被占用导致复制失败
-      # 双保险：
-      #   1) 放 app_offline.htm —— ASP.NET Core 模块看到它会自动优雅关闭应用并释放文件锁
-      #   2) 停止应用池         —— 覆盖前彻底断掉进程（应用池名在顶部 env 配置）
-      # 注意：不要手动删除正在运行的 dotnet 进程，用上面两种方式更安全
-      - name: Take site offline
-        shell: powershell
-        run: |
-          $offline = Join-Path $env:IIS_TARGET 'app_offline.htm'
-          if (-not (Test-Path $env:IIS_TARGET)) {
-            New-Item -ItemType Directory -Path $env:IIS_TARGET -Force | Out-Null
-          }
-          Set-Content -Path $offline -Value '<html><body>Deploying backend, please wait...</body></html>' -Encoding ASCII
-          Write-Host "app_offline.htm created"
-
-          $pool = $env:IIS_APP_POOL
-          if ($pool -and $pool -ne '') {
-            Import-Module WebAdministration -ErrorAction SilentlyContinue
-            if (Get-Command Stop-WebAppPool -ErrorAction SilentlyContinue) {
-              $state = (Get-WebAppPoolState -Name $pool -ErrorAction SilentlyContinue).Value
-              Write-Host "App pool [$pool] state: $state"
-              if ($state -eq 'Started') {
-                Stop-WebAppPool -Name $pool
-                Write-Host "App pool stopped"
-              }
-            } else {
-              Write-Host "WebAdministration module unavailable, skip app pool stop"
-            }
-          }
-          Start-Sleep -Seconds 3
 
       # 步骤8：把发布产物复制到 IIS 目录
       # 只覆盖、不清理：避免误删前端的 index.html / assets
@@ -182,10 +247,25 @@ jobs:
 
           $pool = $env:IIS_APP_POOL
           if ($pool -and $pool -ne '') {
-            Import-Module WebAdministration -ErrorAction SilentlyContinue
-            if (Get-Command Start-WebAppPool -ErrorAction SilentlyContinue) {
-              Start-WebAppPool -Name $pool
-              Write-Host "App pool started: $pool"
+            $appcmd  = Join-Path $env:SystemRoot 'System32\inetsrv\appcmd.exe'
+            $started = $false
+            if (Test-Path $appcmd) {
+              & $appcmd start apppool "/apppool.name:$pool"
+              if ($LASTEXITCODE -eq 0) {
+                Write-Host "App pool started via appcmd: $pool"
+                $started = $true
+              } else {
+                Write-Host "appcmd start failed (exit $LASTEXITCODE)"
+              }
+            }
+            if (-not $started) {
+              Import-Module WebAdministration -ErrorAction SilentlyContinue
+              if (Get-PSDrive -Name IIS -ErrorAction SilentlyContinue) {
+                Start-WebAppPool -Name $pool
+                Write-Host "App pool started via WebAdministration: $pool"
+              } else {
+                Write-Host "IIS: drive unavailable - rely on app_offline.htm removal to restart the app"
+              }
             }
           }
           Write-Host "Backend deploy finished"
