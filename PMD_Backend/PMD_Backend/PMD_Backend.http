@@ -1,0 +1,32 @@
+@PMD_Backend_HostAddress = http://localhost:5290
+
+GET {{PMD_Backend_HostAddress}}/api/weatherforecast/
+Accept: application/json
+
+###
+
+@PMD_Backend_HostAddress = http://localhost:5290
+
+### 结果测试：获取全部结果项（从配置文件读取）
+GET {{PMD_Backend_HostAddress}}/api/ResultTest/
+Accept: application/json
+
+###
+
+### 结果测试：按 Id 获取单个结果项
+GET {{PMD_Backend_HostAddress}}/api/ResultTest/items/3
+Accept: application/json
+
+###
+
+### 结果测试：获取汇总统计
+GET {{PMD_Backend_HostAddress}}/api/ResultTest/summary
+Accept: application/json
+
+###
+
+### 结果测试：健康检查
+GET {{PMD_Backend_HostAddress}}/api/ResultTest/health
+Accept: application/json
+
+###
