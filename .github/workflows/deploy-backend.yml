@@ -110,12 +110,20 @@ jobs:
             # 2a) prefer appcmd.exe (works even when the IIS: drive is unavailable)
             $appcmd = Join-Path $env:SystemRoot 'System32\inetsrv\appcmd.exe'
             if (Test-Path $appcmd) {
+              # 不要写成 `... 2>&1 | Write-Host`：
+              # PowerShell 5.1 + ErrorActionPreference=Stop 下，2>&1 会把原生命令的 stderr
+              # 转成 ErrorRecord 并直接终止脚本（实测）。让 stderr 原样输出即可，不影响后续。
               & $appcmd stop apppool "/apppool.name:$pool"
-              if ($LASTEXITCODE -eq 0) {
+              $code = $LASTEXITCODE
+              if ($code -eq 0) {
                 Write-Host "App pool stopped via appcmd: $pool"
                 $poolStopped = $true
               } else {
-                Write-Host "appcmd stop failed (exit $LASTEXITCODE) - maybe no admin rights, fallback to app_offline.htm only"
+                Write-Host "appcmd stop failed (exit $code) - maybe no admin rights, fallback to app_offline.htm only"
+                # 已降级处理，清掉残留退出码：
+                # GitHub 的 powershell 包装会在脚本末尾执行 exit $LASTEXITCODE，
+                # 后面的 cmdlet 不会刷新它，不清零就会让本 step 明明成功却判失败（踩过）
+                $global:LASTEXITCODE = 0
               }
             } else {
               Write-Host "appcmd.exe not found, skip app pool stop"
@@ -172,6 +180,7 @@ jobs:
             exit 1
           }
           Write-Host "All dll files are writable now"
+          $global:LASTEXITCODE = 0
 
       # 步骤7：备份即将被覆盖的旧文件（此时锁已释放，可以正常读取）
       # 只备份"发布产物里同名的那些文件"，而不是整个 IIS 目录，
@@ -251,11 +260,13 @@ jobs:
             $started = $false
             if (Test-Path $appcmd) {
               & $appcmd start apppool "/apppool.name:$pool"
-              if ($LASTEXITCODE -eq 0) {
+              $code = $LASTEXITCODE
+              if ($code -eq 0) {
                 Write-Host "App pool started via appcmd: $pool"
                 $started = $true
               } else {
-                Write-Host "appcmd start failed (exit $LASTEXITCODE)"
+                Write-Host "appcmd start failed (exit $code)"
+                $global:LASTEXITCODE = 0
               }
             }
             if (-not $started) {
@@ -268,4 +279,6 @@ jobs:
               }
             }
           }
+          # 站点已经恢复，不要再让残留退出码把 job 判失败
+          $global:LASTEXITCODE = 0
           Write-Host "Backend deploy finished"

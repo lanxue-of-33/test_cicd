@@ -291,6 +291,41 @@ cd C:\actions-runner
 > 判断 runner 到底有没有管理员权限：看第 2 步 `Runner info` 日志里的
 > `Running as admin: True/False`。
 
+#### 坑 3：`appcmd` 失败后整个 step 仍判失败（`$LASTEXITCODE` 残留）
+
+日志明明已经走到 `All dll files are writable now`，最后却报：
+
+```
+Error: Process completed with exit code 1
+```
+
+原因：GitHub 的 `shell: powershell` 会在脚本**末尾自动执行 `exit $LASTEXITCODE`**。
+`appcmd` 失败返回 1168，后面全是 PowerShell cmdlet、**不会刷新这个变量**，
+于是 1168 被当成整个 step 的退出码交出去，step 判失败，备份/复制被跳过。
+
+**解法**：在"已容错"的分支里显式清掉它：
+
+```powershell
+$global:LASTEXITCODE = 0
+```
+
+> 顺带一个反直觉的坑：不要为了"吞掉报错"写成 `& $appcmd stop ... 2>&1 | Write-Host`。
+> 在 PowerShell 5.1 + `$ErrorActionPreference='Stop'` 下，`2>&1` 会把原生命令的 stderr
+> 转成 ErrorRecord 并**直接终止脚本**。让 stderr 原样输出即可，不影响后续执行。
+
+#### 实测结论：`app_offline.htm` 单独就够用
+
+从这次的日志看，`appcmd` 因权限失败后，锁依然被释放了：
+
+```
+Still locked: Microsoft.OpenApi.dll - waiting 3s ...
+All dll files are writable now
+```
+
+说明 **ANCM 的 `app_offline.htm` 机制在 in-process 托管下也生效**。
+所以runner 非管理员也能正常发布；`IIS_APP_POOL` 留着只是为了有管理员时更彻底。
+想彻底消除这段 `appcmd` 报错日志，把 `IIS_APP_POOL` 置空即可。
+
 ### 9.6 想改成分开部署（后端单独一个目录 / 子应用）怎么办
 
 现在的方案是前后端共用 `E:\test_iis\PMDVeg`。如果你想改成：
