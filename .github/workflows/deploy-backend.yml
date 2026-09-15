@@ -1,0 +1,48 @@
+name: Backend Deploy
+# 作为复用工作流被主调度器(deploy.yml)调用，不再自行监听 push/dispatch
+on:
+  workflow_call:
+jobs:
+  build:
+    # 与前端保持一致，使用你的 Windows 自托管 runner
+    runs-on: [self-hosted, Windows, X64]
+    steps:
+      # 步骤1：检出代码
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 步骤2：查看本机信息，确认任务运行在你的Windows机器
+      - name: 查看本机信息
+        run: |
+          echo "计算机主机名：$env:COMPUTERNAME"
+          hostname
+        shell: powershell
+
+      # ===================== 后端构建/发布步骤：待补充 =====================
+      # 当前 deploy.yml 仅有前端流程，后端发布逻辑需要你确认后填入。
+      # 下面给出几种常见写法示例（按需启用，不要照抄）：
+      #
+      # 示例A：.NET 构建后发布到 IIS
+      # - name: Setup .NET
+      #   uses: actions/setup-dotnet@v4
+      #   with:
+      #     dotnet-version: '8.0.x'
+      # - name: Build
+      #   run: dotnet build ./PMD_Backend -c Release
+      #   shell: powershell
+      # - name: 备份并发布到 IIS/服务目录
+      #   shell: powershell
+      #   run: |
+      #     # 备份旧站点、复制 PMD_Backend 产物到目标目录、按需重启服务等
+      #     Write-Host "TODO: 实现后端发布步骤"
+      #
+      # 示例B：直接复制已编译产物并重启 Windows 服务
+      # - name: 复制产物并重启服务
+      #   shell: powershell
+      #   run: |
+      #     # Copy-Item ... ; Restart-Service -Name "你的服务名"
+      #     Write-Host "TODO: 实现后端发布步骤"
+
+      - name: 占位-待补充后端发布步骤
+        shell: powershell
+        run: Write-Host "PMD_Backend 发布步骤待补充，请在 deploy-backend.yml 中填写实际命令"
