@@ -15,7 +15,7 @@ function App() {
         transition: 'all 0.3s ease',
       }}
     >
-      <h1>PMD_React 测试页面 test</h1>
+      <h1>PMD_React 测试页面 testa</h1>
       <p>这是一个使用 React + TypeScript + Vite 搭建的演示页面。</p>
 
       {/* 计数器 */}
