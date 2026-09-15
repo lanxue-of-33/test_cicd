@@ -22,7 +22,7 @@ jobs:
       # 步骤3：查看本机信息，确认任务运行在你的Windows机器
       - name: 查看本机信息
         run: |
-          echo "计算机主机名：$env:COMPUTERNAME"
+          echo "Computer name: $env:COMPUTERNAME"
           hostname
         shell: powershell
 
@@ -79,8 +79,8 @@ jobs:
           $iisPath = "E:\test_iis\PMDVeg"
           $backupFullPath = Join-Path $iisPath $backupFileName
 
-          Write-Host "备份文件：$backupFullPath"
-          Write-Host "源目录：$iisPath"
+          Write-Host "Backup file: $backupFullPath"
+          Write-Host "Source dir: $iisPath"
 
           # 仅打包 index.html 文件与 assets 文件夹
           $itemsToBackup = @()
@@ -90,7 +90,7 @@ jobs:
           if (Test-Path $assetsDir) { $itemsToBackup += $assetsDir }
 
           if ($itemsToBackup.Count -eq 0) {
-            Write-Host "未找到 index.html 或 assets，跳过备份"
+            Write-Host "No index.html or assets found, skip backup"
             exit 0
           }
 
@@ -104,8 +104,8 @@ jobs:
           [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
           $buildSource = "./PMD_React/dist"
           $iisTarget = "E:\test_iis\PMDVeg"
-          Write-Host "复制源: $buildSource"
-          Write-Host "目标IIS目录: $iisTarget"
+          Write-Host "Copy source: $buildSource"
+          Write-Host "Target IIS dir: $iisTarget"
 
           # Copy-Item 递归复制，-Force 强制覆盖已有文件
           Copy-Item -Path "$buildSource\*" -Destination $iisTarget -Recurse -Force
