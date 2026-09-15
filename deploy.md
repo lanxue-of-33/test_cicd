@@ -18,7 +18,7 @@
 .github/workflows/
 ├── deploy.yml            ← 主调度器（本文重点）：监听+判断+路由
 ├── deploy-frontend.yml   ← 子流程1：前端构建并发布到 IIS（on: workflow_call）
-└── deploy-backend.yml    ← 子流程2：后端发布（on: workflow_call，目前是骨架）
+└── deploy-backend.yml    ← 子流程2：后端 .NET 8 发布（on: workflow_call，已实装）
 ```
 
 - **主文件** `deploy.yml`：`on` 里写 `push` / `workflow_dispatch`，所以只有它会被"自动触发"。
@@ -183,4 +183,74 @@ concurrency:
 
 ---
 
-> 提示：真正的前端构建/发布命令在 `deploy-frontend.yml`，后端发布步骤待补充在 `deploy-backend.yml`。
+> 前端构建/发布命令在 `deploy-frontend.yml`，后端发布流程见下面第 9 节。
+
+---
+
+## 9. 后端发布流程做了什么（deploy-backend.yml）
+
+后端是 **.NET 8 Web API**（`PMD_Backend/PMD_Backend/PMD_Backend.csproj`），
+和前端发布到**同一个 IIS 目录** `E:\test_iis\PMDVeg`（前端静态文件 + 后端 dll 混放在一个站点里）。
+
+所有可变参数都集中在文件顶部的 `env` 区，改那里就行：
+
+| 变量 | 当前值 | 作用 |
+|---|---|---|
+| `IIS_TARGET` | `E:\test_iis\PMDVeg` | 发布目标目录 |
+| `IIS_APP_POOL` | `PMDVeg` | 要停/启的应用程序池，留空则只靠 app_offline.htm |
+| `PROJECT_PATH` | `./PMD_Backend/PMD_Backend/PMD_Backend.csproj` | 要发布的项目 |
+| `PUBLISH_DIR` | `./PMD_Backend/PMD_Backend/bin/Release/net8.0/publish` | publish 输出目录 |
+| `SKIP_WEB_CONFIG` | `true` | 是否跳过覆盖服务器上的 web.config（见下） |
+
+### 9.1 九个步骤
+
+1. **Checkout** 拉代码
+2. **Runner info** 打印机器名，确认跑在你的 Windows 上
+3. **Fix missing user env vars** 补齐 `APPDATA` 等变量（runner 以服务方式跑时这些变量可能为空，
+   会让 `dotnet restore` 报 `Value cannot be null. (Parameter 'path1')`）
+4. **Check dotnet** 打印 `dotnet --version`（本机已装 .NET 8 SDK，没再用 setup-dotnet 重复下载）
+5. **dotnet publish** 编译并输出到 `PUBLISH_DIR`
+6. **Backup** 备份即将被覆盖的旧文件 → `back_yyyyMMdd_HHmmss_sha.zip`（与前端 `front_` 对应）
+7. **Take site offline** 放 `app_offline.htm` + 停应用池
+8. **Copy** 复制产物到 IIS 目录（跳过 web.config）
+9. **Bring site back online** 删 `app_offline.htm` + 启应用池（带 `if: always()`，失败也必须拉起来）
+
+### 9.2 为什么要先"离线"再复制
+
+Windows 上正在运行的 dll **是被进程锁住的**，直接覆盖会报"文件被占用"。
+所以用了双保险：
+
+- **`app_offline.htm`**：ASP.NET Core 模块（ANCM）一看到这个文件，就会优雅关闭应用、释放文件锁；
+  删掉它应用自动重启。这是官方推荐做法。
+- **停应用池**：更彻底，覆盖前把进程整个停掉。
+
+### 9.3 ⚠️ 为什么必须跳过 web.config（最容易踩的坑）
+
+服务器上现有的 `web.config` 是**手工定制**过的：
+
+```xml
+<!-- 只把 api 和 swagger 交给 ANCM，其余静态文件由 IIS 原生处理 -->
+<add name="aspNetCoreApi"     path="api/*"     verb="*" modules="AspNetCoreModuleV2" ... />
+<add name="aspNetCoreSwagger" path="swagger/*" verb="*" modules="AspNetCoreModuleV2" ... />
+```
+
+而 `dotnet publish` 生成的默认 `web.config` 是 `path="*"` **全量接管**。
+如果直接覆盖，前端的 `index.html` / `assets` 也会被后端接管 → **页面直接白屏**。
+
+所以第 8 步会跳过 `web.config`，**只有在服务器上本来就没有 web.config（首次部署）时才复制**。
+以后如果你主动改了服务器的 web.config 规则，记得别关掉这个开关（`SKIP_WEB_CONFIG`）。
+
+### 9.4 备份为什么只备份"一部分"
+
+备份不是打包整个 IIS 目录，而是**只打包"发布产物里同名的那些文件"**。
+这样不会把前端 `assets`（通常几十 MB）也塞进 `back_*.zip`，体积和速度都可控。
+
+### 9.5 想改成分开部署（后端单独一个目录 / 子应用）怎么办
+
+现在的方案是前后端共用 `E:\test_iis\PMDVeg`。如果你想改成：
+
+- 后端单独目录（如 `E:\test_iis\PMDApi`）→ 改 `IIS_TARGET` + `IIS_APP_POOL` 即可
+- 后端作为 `/api` 子应用挂在前端站点下 → 改 `IIS_TARGET` 为 `E:\test_iis\PMDVeg\api`，
+  并在 IIS 里把它"转换为应用程序"
+
+两种都不用改步骤逻辑。

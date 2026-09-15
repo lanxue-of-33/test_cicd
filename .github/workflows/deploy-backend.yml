@@ -2,6 +2,21 @@ name: Backend Deploy
 # 作为复用工作流被主调度器(deploy.yml)调用，不再自行监听 push/dispatch
 on:
   workflow_call:
+
+# ===================== 集中配置区（改这里就够了） =====================
+# 后面所有步骤都从这里取值，想换目录/换应用池只改这一段
+env:
+  # 后端发布目标目录：与前端 IIS 站点目录保持一致（前端是 E:\test_iis\PMDVeg）
+  IIS_TARGET: 'E:\test_iis\PMDVeg'
+  # IIS 应用程序池名称。留空则只依赖 app_offline.htm 离线，不操作应用池
+  IIS_APP_POOL: 'PMDVeg'
+  # 要发布的项目文件（.NET 8 Web API）
+  PROJECT_PATH: './PMD_Backend/PMD_Backend/PMD_Backend.csproj'
+  # dotnet publish 的输出目录（放在工作区内，下一步从这里复制到 IIS）
+  PUBLISH_DIR: './PMD_Backend/PMD_Backend/bin/Release/net8.0/publish'
+  # 是否跳过覆盖服务器上的 web.config（强烈建议 true，原因见第8步注释）
+  SKIP_WEB_CONFIG: 'true'
+
 jobs:
   build:
     # 与前端保持一致，使用你的 Windows 自托管 runner
@@ -11,38 +26,166 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 步骤2：查看本机信息，确认任务运行在你的Windows机器
-      - name: 查看本机信息
+      # 步骤2：查看本机信息，确认任务运行在你的 Windows 机器
+      # 注意：本文件所有 PowerShell 字符串与注释一律用英文，
+      #       因为自托管 Windows runner 默认 GBK 代码页读取 UTF-8 脚本，中文会破坏引号导致 ParserError
+      - name: Runner info
+        shell: powershell
         run: |
-          echo "计算机主机名：$env:COMPUTERNAME"
+          Write-Host "Computer name: $env:COMPUTERNAME"
+          Write-Host "Workspace: $env:GITHUB_WORKSPACE"
           hostname
-        shell: powershell
 
-      # ===================== 后端构建/发布步骤：待补充 =====================
-      # 当前 deploy.yml 仅有前端流程，后端发布逻辑需要你确认后填入。
-      # 下面给出几种常见写法示例（按需启用，不要照抄）：
-      #
-      # 示例A：.NET 构建后发布到 IIS
-      # - name: Setup .NET
-      #   uses: actions/setup-dotnet@v4
-      #   with:
-      #     dotnet-version: '8.0.x'
-      # - name: Build
-      #   run: dotnet build ./PMD_Backend -c Release
-      #   shell: powershell
-      # - name: 备份并发布到 IIS/服务目录
-      #   shell: powershell
-      #   run: |
-      #     # 备份旧站点、复制 PMD_Backend 产物到目标目录、按需重启服务等
-      #     Write-Host "TODO: 实现后端发布步骤"
-      #
-      # 示例B：直接复制已编译产物并重启 Windows 服务
-      # - name: 复制产物并重启服务
-      #   shell: powershell
-      #   run: |
-      #     # Copy-Item ... ; Restart-Service -Name "你的服务名"
-      #     Write-Host "TODO: 实现后端发布步骤"
-
-      - name: 占位-待补充后端发布步骤
+      # 步骤3：补齐缺失的用户环境变量（自托管 runner 以服务方式运行时常见）
+      # 现象：dotnet restore 报 "Value cannot be null. (Parameter 'path1')"，
+      #       原因是 APPDATA / PROGRAMFILES 等变量为空，NuGet 拼路径失败。
+      # 这里用 GITHUB_ENV 落盘，后续所有 step 都能继承。
+      - name: Fix missing user env vars
         shell: powershell
-        run: Write-Host "PMD_Backend 发布步骤待补充，请在 deploy-backend.yml 中填写实际命令"
+        run: |
+          $fix = @{}
+          if (-not $env:APPDATA)            { $fix['APPDATA']            = Join-Path $env:USERPROFILE 'AppData\Roaming' }
+          if (-not $env:LOCALAPPDATA)       { $fix['LOCALAPPDATA']       = Join-Path $env:USERPROFILE 'AppData\Local' }
+          if (-not $env:PROGRAMFILES)       { $fix['PROGRAMFILES']       = 'C:\Program Files' }
+          if (-not ${env:ProgramFiles(x86)}) { $fix['ProgramFiles(x86)'] = 'C:\Program Files (x86)' }
+          if (-not $env:ProgramData)        { $fix['ProgramData']        = 'C:\ProgramData' }
+          foreach ($k in $fix.Keys) {
+            Add-Content -Path $env:GITHUB_ENV -Value "$k=$($fix[$k])"
+            Write-Host "Set $k = $($fix[$k])"
+          }
+          if ($fix.Count -eq 0) { Write-Host "All user env vars present, nothing to fix" }
+
+      # 步骤4：确认 dotnet 可用（本机已装 .NET 8 SDK，不再用 setup-dotnet 重复下载）
+      - name: Check dotnet
+        shell: powershell
+        run: |
+          dotnet --version
+          where.exe dotnet
+
+      # 步骤5：编译并发布后端
+      # -c Release  发布模式
+      # -o          输出到 PUBLISH_DIR，只把这一份产物复制到 IIS
+      - name: dotnet publish
+        shell: powershell
+        run: |
+          Write-Host "Project: $env:PROJECT_PATH"
+          Write-Host "Output : $env:PUBLISH_DIR"
+          dotnet publish $env:PROJECT_PATH -c Release -o $env:PUBLISH_DIR --nologo
+          if ($LASTEXITCODE -ne 0) { Write-Host "dotnet publish failed"; exit $LASTEXITCODE }
+          Get-ChildItem $env:PUBLISH_DIR | Select-Object -ExpandProperty Name
+
+      # 步骤6：备份即将被覆盖的旧文件
+      # 思路：只备份"发布产物里同名的那些文件"，而不是整个 IIS 目录，
+      #       这样不会把前端的 index.html / assets 一起塞进备份包，体积可控。
+      # 命名沿用前端规则，前缀换成 back_ ：back_yyyyMMdd_HHmmss_commitSha.zip
+      - name: Backup current backend files
+        shell: powershell
+        run: |
+          $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+          $sha       = $env:GITHUB_SHA.Substring(0,7)
+          $backupFile = Join-Path $env:IIS_TARGET "back_$timestamp`_$sha.zip"
+
+          $items = @()
+          Get-ChildItem -Path $env:PUBLISH_DIR | ForEach-Object {
+            $p = Join-Path $env:IIS_TARGET $_.Name
+            if (Test-Path $p) { $items += $p }
+          }
+
+          Write-Host "Backup file: $backupFile"
+          Write-Host "Items to back up: $($items.Count)"
+
+          if ($items.Count -eq 0) {
+            Write-Host "No existing backend files found, skip backup"
+            exit 0
+          }
+
+          if (-not (Test-Path $env:IIS_TARGET)) {
+            New-Item -ItemType Directory -Path $env:IIS_TARGET -Force | Out-Null
+          }
+          Compress-Archive -Path $items -DestinationPath $backupFile -Force
+          Write-Host "Backup created"
+
+      # 步骤7：让站点离线，避免 dll 被占用导致复制失败
+      # 双保险：
+      #   1) 放 app_offline.htm —— ASP.NET Core 模块看到它会自动优雅关闭应用并释放文件锁
+      #   2) 停止应用池         —— 覆盖前彻底断掉进程（应用池名在顶部 env 配置）
+      # 注意：不要手动删除正在运行的 dotnet 进程，用上面两种方式更安全
+      - name: Take site offline
+        shell: powershell
+        run: |
+          $offline = Join-Path $env:IIS_TARGET 'app_offline.htm'
+          if (-not (Test-Path $env:IIS_TARGET)) {
+            New-Item -ItemType Directory -Path $env:IIS_TARGET -Force | Out-Null
+          }
+          Set-Content -Path $offline -Value '<html><body>Deploying backend, please wait...</body></html>' -Encoding ASCII
+          Write-Host "app_offline.htm created"
+
+          $pool = $env:IIS_APP_POOL
+          if ($pool -and $pool -ne '') {
+            Import-Module WebAdministration -ErrorAction SilentlyContinue
+            if (Get-Command Stop-WebAppPool -ErrorAction SilentlyContinue) {
+              $state = (Get-WebAppPoolState -Name $pool -ErrorAction SilentlyContinue).Value
+              Write-Host "App pool [$pool] state: $state"
+              if ($state -eq 'Started') {
+                Stop-WebAppPool -Name $pool
+                Write-Host "App pool stopped"
+              }
+            } else {
+              Write-Host "WebAdministration module unavailable, skip app pool stop"
+            }
+          }
+          Start-Sleep -Seconds 3
+
+      # 步骤8：把发布产物复制到 IIS 目录
+      # 只覆盖、不清理：避免误删前端的 index.html / assets
+      #
+      # ⚠️ 为什么要跳过 web.config？
+      #   服务器上现有的 web.config 是手工定制的：
+      #     - 只把 api/* 和 swagger/* 交给 AspNetCoreModuleV2
+      #     - 其余静态文件交给 IIS 原生处理（前端页面才有得看）
+      #   而 dotnet publish 生成的默认 web.config 是 path="*" 全量接管，
+      #   一旦覆盖，前端 index.html / assets 会被后端接管 → 页面直接白屏。
+      #   所以这里默认跳过；只有当服务器上本来就没有 web.config（首次部署）时才复制。
+      - name: 'Publish - copy output to IIS directory'
+        shell: powershell
+        run: |
+          Write-Host "Copy source: $env:PUBLISH_DIR"
+          Write-Host "Target dir : $env:IIS_TARGET"
+
+          $skipWebConfig = ($env:SKIP_WEB_CONFIG -eq 'true')
+          $targetConfig  = Join-Path $env:IIS_TARGET 'web.config'
+
+          Get-ChildItem -Path $env:PUBLISH_DIR | ForEach-Object {
+            $name = $_.Name
+            if ($skipWebConfig -and $name -eq 'web.config' -and (Test-Path $targetConfig)) {
+              Write-Host "Skip web.config (keep the customized one on server)"
+            } else {
+              Copy-Item -Path $_.FullName -Destination $env:IIS_TARGET -Recurse -Force
+              Write-Host "Copied: $name"
+            }
+          }
+
+          Write-Host "Copy done"
+          Get-ChildItem $env:IIS_TARGET | Select-Object -ExpandProperty Name
+
+      # 步骤9：恢复站点上线
+      # 关键：if: always() —— 即使上一步复制失败也要把站点拉起来，不能让它一直离线
+      - name: Bring site back online
+        if: always()
+        shell: powershell
+        run: |
+          $offline = Join-Path $env:IIS_TARGET 'app_offline.htm'
+          if (Test-Path $offline) {
+            Remove-Item $offline -Force
+            Write-Host "app_offline.htm removed"
+          }
+
+          $pool = $env:IIS_APP_POOL
+          if ($pool -and $pool -ne '') {
+            Import-Module WebAdministration -ErrorAction SilentlyContinue
+            if (Get-Command Start-WebAppPool -ErrorAction SilentlyContinue) {
+              Start-WebAppPool -Name $pool
+              Write-Host "App pool started: $pool"
+            }
+          }
+          Write-Host "Backend deploy finished"
