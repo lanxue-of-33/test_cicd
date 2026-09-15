@@ -66,7 +66,7 @@ jobs:
         working-directory: ./PMD_React
 
       # ===================== 新增：第一步 备份旧站点 =====================
-      - name: 备份IIS旧站点(排除zip)
+      - name: 备份IIS旧站点(index.html + assets)
         shell: powershell
         run: |
           [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -74,18 +74,28 @@ jobs:
           $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
           # 获取commit短SHA, GitHub内置环境变量 GITHUB_SHA
           $commitSha = $env:GITHUB_SHA.Substring(0,7)
-          $backupFileName = "$timestamp`_$commitSha.zip"
+          # 压缩包文件名以 front 开头，其余沿用原有命名规则
+          $backupFileName = "front_$timestamp`_$commitSha.zip"
           $iisPath = "E:\test_iis\PMDVeg"
           $backupFullPath = Join-Path $iisPath $backupFileName
 
           Write-Host "备份文件：$backupFullPath"
           Write-Host "源目录：$iisPath"
 
-          # 获取目录内所有文件，排除后缀为 .zip 的文件
-          $filesToBackup = Get-ChildItem -Path $iisPath -Recurse | Where-Object { $_.Extension -ne ".zip" }
+          # 仅打包 index.html 文件与 assets 文件夹
+          $itemsToBackup = @()
+          $indexFile = Join-Path $iisPath "index.html"
+          $assetsDir = Join-Path $iisPath "assets"
+          if (Test-Path $indexFile) { $itemsToBackup += $indexFile }
+          if (Test-Path $assetsDir) { $itemsToBackup += $assetsDir }
+
+          if ($itemsToBackup.Count -eq 0) {
+            Write-Host "未找到 index.html 或 assets，跳过备份"
+            exit 0
+          }
 
           # 压缩，-Force 覆盖同名备份包（理论上时间戳不会重复）
-          Compress-Archive -Path $filesToBackup.FullName -DestinationPath $backupFullPath -Force
+          Compress-Archive -Path $itemsToBackup -DestinationPath $backupFullPath -Force
 
       # ===================== 新增：第二步 复制新构建产物到IIS目录 =====================
       - name: 发布:复制build产物到IIS目录
